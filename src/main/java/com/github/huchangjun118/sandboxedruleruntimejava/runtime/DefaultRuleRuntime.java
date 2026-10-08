@@ -67,7 +67,7 @@ public final class DefaultRuleRuntime implements RuleRuntime {
         this.executor = new BoundedSandboxExecutor(
                 props.getWorkerThreads(),
                 Math.max(4, props.getWorkerThreads() * 2),
-                512L * 1024L);
+                1024L * 1024L);
         this.defaultQuota = new ResourceQuota(
                 props.getDefaultTimeoutMillis(),
                 props.getDefaultMemoryBytes(),
@@ -83,14 +83,54 @@ public final class DefaultRuleRuntime implements RuleRuntime {
             t.setDaemon(true);
             return t;
         });
+        warmUpWorkers(props.getWorkerThreads());
+    }
+
+    /**
+     * Force each pooled worker through a few trivial Graal evaluations at construction so
+     * the interpreter's one-time per-thread allocations happen on idle workers and are
+     * folded into their memory baselines, never charged to a real script.
+     */
+    private void warmUpWorkers(int workerCount) {
+        ResourceQuota warm = new ResourceQuota(
+                Math.max(5000, defaultQuota.getTimeoutMillis()),
+                64L * 1024 * 1024,
+                defaultQuota.getOutputBytes(),
+                defaultQuota.getMaxRecursionDepth(),
+                defaultQuota.getStatementLimit());
+        RuleVersion warmVersion = new RuleVersion("__warmup__", 1,
+                "function decide(){ return {allowed:true}; }", warm, null);
+        EvaluationRequest warmRequest = new EvaluationRequest(
+                "__warmup__", java.util.Map.of(), java.util.Map.of(), 0L);
+        int passes = 3;
+        java.util.List<Future<?>> tasks = new java.util.ArrayList<>();
+        for (int i = 0; i < workerCount * passes; i++) {
+            try {
+                tasks.add(executor.submit(
+                        () -> sandboxEngine.evaluate(warmVersion, warmRequest)));
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                // pool/queue sizing guarantees room; if not, warm-up is best-effort.
+            }
+        }
+        for (Future<?> t : tasks) {
+            try {
+                t.get(10, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+                // Warm-up must never prevent startup; real calls re-trigger any lazy path.
+            }
+        }
     }
 
     public ResourceQuota defaultQuota() {
         return defaultQuota;
     }
 
-    /** Parse and validate source before a version can be committed. Never mutates state. */
-    private Object compile(String ruleId, int version, String source) {
+    /**
+     * Parse and validate source before a version can be committed. Never mutates state.
+     * Serialized because the shared compilation engine/context is not safe to drive
+     * concurrently; concurrent publishes would otherwise block each other for seconds.
+     */
+    private synchronized Object compile(String ruleId, int version, String source) {
         try (Context context = Context.newBuilder("js")
                 .engine(compileEngine)
                 .build()) {

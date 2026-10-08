@@ -1,86 +1,102 @@
 package com.github.huchangjun118.sandboxedruleruntimejava.sandbox;
 
-import com.sun.management.ThreadMXBean;
-
-import java.lang.management.ManagementFactory;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Polls a worker thread's allocated-byte counter from a watchdog thread and trips a flag
- * when the per-execution memory quota is exceeded. The worker checks this flag at
- * instrumentation sampling points and at the end, and the watchdog also interrupts the
- * worker as a backstop. Allocation counts are cumulative for the thread, so the baseline
- * taken at evaluation start is subtracted.
+ * Process-wide enforcement of per-evaluation <b>retained heap</b> budgets.
+ *
+ * <p>Why retained heap and not cumulative allocation: GraalJS in interpreted-only mode
+ * generates large volumes of short-lived allocations even for pure CPU loops (tens of MB
+ * per second) that the JVM immediately collects. Bounding cumulative allocation would
+ * reject harmless CPU-bound scripts; measuring post-GC live-heap growth instead captures
+ * what a script actually keeps (arrays/objects/strings) — the resource a runaway script
+ * uses to exhaust the host.</p>
+ *
+ * <p>A single daemon scheduler performs at most one full-heap measurement per tick for
+ * all active evaluations, so concurrent scripts do not each trigger their own GC and
+ * contend the runtime. When an evaluation exceeds its budget it is marked and its
+ * force-cancel action (closing the polyglot context) is invoked once.</p>
  */
 public final class MemoryWatcher {
 
-    private static final ThreadMXBean THREAD_BEAN =
-            (ThreadMXBean) ManagementFactory.getThreadMXBean();
+    /** One active evaluation's accounting. */
+    private static final class Account {
+        final long baseline;
+        final long limit;
+        final Runnable forceCancel;
+        final AtomicBoolean exceeded = new AtomicBoolean(false);
 
-    private final long limitBytes;
-    private final Thread worker;
-    private final long baseline;
-    private final AtomicBoolean exceeded = new AtomicBoolean(false);
-    private final AtomicBoolean stopped = new AtomicBoolean(false);
-    private final long pollIntervalMillis;
-    private final Runnable forceCancel;
-    private Thread watcher;
-
-    public MemoryWatcher(Thread worker, long baseline, long limitBytes, long pollIntervalMillis) {
-        this(worker, baseline, limitBytes, pollIntervalMillis, null);
+        Account(long baseline, long limit, Runnable forceCancel) {
+            this.baseline = baseline;
+            this.limit = limit;
+            this.forceCancel = forceCancel;
+        }
     }
 
-    public MemoryWatcher(Thread worker, long baseline, long limitBytes,
+    private static final Set<Account> ACTIVE = ConcurrentHashMap.newKeySet();
+    private static final long POLL_MILLIS = 250;
+
+    private static final ScheduledExecutorService SCHEDULER =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "rule-mem-watch");
+                t.setDaemon(true);
+                return t;
+            });
+
+    static {
+        SCHEDULER.scheduleAtFixedRate(MemoryWatcher::tick,
+                POLL_MILLIS, POLL_MILLIS, TimeUnit.MILLISECONDS);
+    }
+
+    private static void tick() {
+        if (ACTIVE.isEmpty()) {
+            return;
+        }
+        long live;
+        try {
+            Runtime runtime = Runtime.getRuntime();
+            runtime.gc();
+            live = runtime.totalMemory() - runtime.freeMemory();
+        } catch (Throwable t) {
+            return;
+        }
+        for (Account account : ACTIVE) {
+            if (live - account.baseline > account.limit
+                    && account.exceeded.compareAndSet(false, true)
+                    && account.forceCancel != null) {
+                account.forceCancel.run();
+            }
+        }
+    }
+
+    /** Process-wide live (post-GC) heap usage. */
+    public static long liveHeapBytes() {
+        Runtime runtime = Runtime.getRuntime();
+        runtime.gc();
+        return runtime.totalMemory() - runtime.freeMemory();
+    }
+
+    private final Account account;
+
+    public MemoryWatcher(Thread worker, long baselineIgnored, long limitBytes,
                          long pollIntervalMillis, Runnable forceCancel) {
-        this.worker = worker;
-        this.baseline = baseline;
-        this.limitBytes = limitBytes;
-        this.pollIntervalMillis = Math.max(1, pollIntervalMillis);
-        this.forceCancel = forceCancel;
-    }
-
-    public static long allocatedByCurrentThread() {
-        return THREAD_BEAN.getThreadAllocatedBytes(Thread.currentThread().getId());
+        this.account = new Account(liveHeapBytes(), limitBytes, forceCancel);
     }
 
     public boolean isExceeded() {
-        return exceeded.get();
+        return account.exceeded.get();
     }
 
     public void start() {
-        watcher = new Thread(this::watchLoop, "rule-mem-watch");
-        watcher.setDaemon(true);
-        watcher.start();
-    }
-
-    private void watchLoop() {
-        long workerId = worker.getId();
-        while (!stopped.get()) {
-            try {
-                Thread.sleep(pollIntervalMillis);
-            } catch (InterruptedException e) {
-                return;
-            }
-            if (stopped.get()) {
-                return;
-            }
-            long allocated = THREAD_BEAN.getThreadAllocatedBytes(workerId) - baseline;
-            if (allocated > limitBytes) {
-                exceeded.set(true);
-                if (forceCancel != null) {
-                    forceCancel.run();
-                }
-                return;
-            }
-        }
+        ACTIVE.add(account);
     }
 
     public void stop() {
-        stopped.set(true);
-        if (watcher != null) {
-            watcher.interrupt();
-        }
-        // Clear any interrupt this watcher raised so the pooled worker stays clean.
-        Thread.interrupted();
+        ACTIVE.remove(account);
     }
 }

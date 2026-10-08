@@ -78,7 +78,9 @@ public final class SandboxPolicy {
         if (name == null) {
             return DenyReason.HOST_ACCESS;
         }
-        String n = name.replace('/', '.');
+        // GraalJS hands host-class lookups up using an internal form where package dots
+        // become '$' (e.g. "java$io$File"); normalise both separators before matching.
+        String n = name.replace('/', '.').replace('$', '.');
         for (String p : FILE_PACKAGES) {
             if (n.startsWith(p)) {
                 return DenyReason.FILE_SYSTEM;

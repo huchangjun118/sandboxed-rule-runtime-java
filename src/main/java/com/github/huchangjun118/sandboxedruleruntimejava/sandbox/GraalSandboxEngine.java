@@ -126,15 +126,17 @@ public final class GraalSandboxEngine implements SandboxEngine {
                 .out(output)
                 .err(output);
 
-        long baseline = MemoryWatcher.allocatedByCurrentThread();
-
         ContextRegistrar currentRegistrar = registrar.get();
         Context context = builder.build();
         if (currentRegistrar != null) {
             currentRegistrar.register(context);
         }
+        // Retained-heap budget: baseline measured (with GC) before guest code runs.
+        // The polling interval deliberately trades detection granularity for low GC
+        // overhead: a full heap measurement every ~100ms is enough to stop a script that
+        // is genuinely accumulating objects without stalling many concurrent workers.
         MemoryWatcher memoryWatcher = new MemoryWatcher(
-                Thread.currentThread(), baseline, quota.getMemoryBytes(), 2L,
+                Thread.currentThread(), 0L, quota.getMemoryBytes(), 100L,
                 () -> { try { context.close(true); } catch (Throwable ignored) { } });
         memoryWatcher.start();
         try {
@@ -180,6 +182,10 @@ public final class GraalSandboxEngine implements SandboxEngine {
             if (memoryWatcher.isExceeded()) {
                 throw new ScriptExecutionException(ExecutionErrorKind.MEMORY_LIMIT,
                         "allocation exceeded " + quota.getMemoryBytes() + " bytes");
+            }
+            if (output.isOverflowed()) {
+                throw new ScriptExecutionException(ExecutionErrorKind.OUTPUT_LIMIT,
+                        "script output exceeded " + quota.getOutputBytes() + " bytes");
             }
             Decision decision = toDecision(decisionValue);
             long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
@@ -262,9 +268,7 @@ public final class GraalSandboxEngine implements SandboxEngine {
             return new ScriptExecutionException(ExecutionErrorKind.MEMORY_LIMIT,
                     "allocation exceeded " + quota.getMemoryBytes() + " bytes", e);
         }
-        Throwable host = e.isHostException() ? e.asHostException() : null;
-        if (host instanceof CappedOutputBuffer.OutputLimitExceededException
-                || output.isOverflowed()) {
+        if (output.isOverflowed()) {
             return new ScriptExecutionException(ExecutionErrorKind.OUTPUT_LIMIT,
                     "script output exceeded " + quota.getOutputBytes() + " bytes", e);
         }
@@ -317,6 +321,18 @@ public final class GraalSandboxEngine implements SandboxEngine {
     /** Map every failure mode to a distinct, stable {@link ExecutionErrorKind}. */
     private ScriptExecutionException mapPolyglot(PolyglotException e, CappedOutputBuffer output) {
         // Force-cancellation by the wall-clock watchdog.
+        // Resource exhaustion (statement budget / recursion) is also reported as
+        // "cancelled" by Graal, so it must be classified before the generic cancellation.
+        if (e.isResourceExhausted()) {
+            String exhaustedMsg = e.getMessage() == null ? "" : e.getMessage();
+            if (exhaustedMsg.contains("Statement count")) {
+                return new ScriptExecutionException(ExecutionErrorKind.STATEMENT_LIMIT,
+                        exhaustedMsg, e);
+            }
+            return new ScriptExecutionException(ExecutionErrorKind.RECURSION_LIMIT,
+                    exhaustedMsg, e);
+        }
+        // Force-cancellation by the wall-clock watchdog.
         if (e.isCancelled()) {
             return new ScriptExecutionException(ExecutionErrorKind.TIMEOUT,
                     "execution cancelled by watchdog", e);
@@ -331,20 +347,14 @@ public final class GraalSandboxEngine implements SandboxEngine {
             return new ScriptExecutionException(ExecutionErrorKind.INTERNAL,
                     hostException.toString(), e);
         }
-        if (e.isResourceExhausted()) {
-            String msg = e.getMessage() == null ? "" : e.getMessage();
-            if (msg.contains("Statement count")) {
-                return new ScriptExecutionException(ExecutionErrorKind.STATEMENT_LIMIT, msg, e);
-            }
-            return new ScriptExecutionException(ExecutionErrorKind.RECURSION_LIMIT, msg, e);
-        }
         if (e.isGuestException()) {
             String msg = e.getMessage() == null ? "script error" : e.getMessage();
             if (msg.contains("Thread was interrupted")) {
                 return new ScriptExecutionException(ExecutionErrorKind.TIMEOUT,
                         "execution cancelled by watchdog", e);
             }
-            if (msg.contains("recursion depth limit")) {
+            if (msg.contains("recursion depth limit")
+                    || msg.contains("Maximum call stack size exceeded")) {
                 return new ScriptExecutionException(ExecutionErrorKind.RECURSION_LIMIT, msg, e);
             }
             if (e.isSyntaxError()) {

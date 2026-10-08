@@ -8,7 +8,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 @ConfigurationProperties(prefix = "rule.sandbox")
 public class RuntimeProperties {
     private int workerThreads = 8;
-    private long defaultTimeoutMillis = 1000;
+    private long defaultTimeoutMillis = 2000;
     private long defaultMemoryBytes = 16 * 1024 * 1024;
     private long defaultOutputBytes = 64 * 1024;
     private int defaultRecursionDepth = 500;

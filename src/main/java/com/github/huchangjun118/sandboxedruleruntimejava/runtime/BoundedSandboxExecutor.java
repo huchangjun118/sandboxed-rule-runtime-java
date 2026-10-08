@@ -45,6 +45,9 @@ public final class BoundedSandboxExecutor implements EvaluationExecutor {
                     throw new RejectedExecutionException(
                             "sandbox saturated: all workers busy and queue full");
                 });
+        // Start workers eagerly so their existence does not add latency to the first
+        // request; the runtime performs Graal-level per-worker warm-up after construction.
+        this.pool.prestartAllCoreThreads();
     }
 
     @Override
