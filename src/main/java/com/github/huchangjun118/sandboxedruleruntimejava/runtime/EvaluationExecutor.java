@@ -10,6 +10,8 @@ import java.util.concurrent.Future;
 public interface EvaluationExecutor {
     <T> Future<T> submit(CallableWithContext<T> task);
     void shutdown();
+    boolean awaitTermination(long timeout, java.util.concurrent.TimeUnit unit)
+            throws InterruptedException;
     int activeCount();
     int poolSize();
 

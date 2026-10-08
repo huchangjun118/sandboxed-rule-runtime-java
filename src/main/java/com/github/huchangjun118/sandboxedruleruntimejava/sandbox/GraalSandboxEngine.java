@@ -78,6 +78,18 @@ public final class GraalSandboxEngine implements SandboxEngine {
         return policy;
     }
 
+    /** Release all shared Graal engines (code caches/instruments). Call on runtime stop. */
+    public synchronized void close() {
+        engines.values().forEach(handle -> {
+            try {
+                handle.engine().close(true);
+            } catch (Throwable ignored) {
+                // best-effort shutdown
+            }
+        });
+        engines.clear();
+    }
+
     private synchronized EngineHandle engineFor(int recursionLimit) {
         return engines.computeIfAbsent(recursionLimit, limit -> {
             Engine engine = Engine.newBuilder(LANGUAGE)

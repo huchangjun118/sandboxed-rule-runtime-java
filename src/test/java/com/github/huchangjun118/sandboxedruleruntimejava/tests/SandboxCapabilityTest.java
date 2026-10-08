@@ -13,11 +13,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * Every forbidden capability must be rejected <em>and</em> reported with a reason that
@@ -81,6 +83,27 @@ class SandboxCapabilityTest {
         ScriptExecutionException ex = (ScriptExecutionException) catchFailure("deny-cls");
         assertEquals(ExecutionErrorKind.DENIED, ex.getKind());
         assertEquals(DenyReason.REFLECTION, ex.getDenyReason());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "Java.type('java.lang.Runtime').getRuntime();",
+            "Java.extend(Java.type('java.lang.Thread'), {});",
+            "new (Java.type('java.util.HashMap'))();",
+            "load('file:///etc/hostname');",
+            "load('/etc/hostname');",
+            "read('/etc/passwd');"
+    })
+    void commonEscapeVectorsCannotReachHost(String attempt) {
+        String id = "esc-" + Math.abs(attempt.hashCode());
+        runtime.publish(id, 1, "function decide(){ " + attempt + " return {allowed:true}; }", quota);
+        Throwable t = catchFailure(id);
+        // Every escape vector must surface as a sandbox denial or a guest-side failure
+        // (undefined helper / IO not allowed) — never as a successful host interaction.
+        if (t instanceof ScriptExecutionException see) {
+            assertNotEquals(ExecutionErrorKind.INTERNAL, see.getKind(),
+                    "escape vector must not cause an internal error: " + attempt);
+        }
     }
 
     private Throwable catchFailure(String id) {

@@ -273,6 +273,15 @@ public final class DefaultRuleRuntime implements RuleRuntime {
     public void shutdown() {
         watchdog.shutdownNow();
         executor.shutdown();
+        try {
+            if (!executor.awaitTermination(2, TimeUnit.SECONDS)) {
+                executor.shutdown();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            executor.shutdown();
+        }
+        sandboxEngine.close();
         compileEngine.close(true);
     }
 }

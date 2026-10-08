@@ -61,6 +61,11 @@ public final class BoundedSandboxExecutor implements EvaluationExecutor {
     }
 
     @Override
+    public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+        return pool.awaitTermination(timeout, unit);
+    }
+
+    @Override
     public int activeCount() {
         return pool.getActiveCount();
     }
