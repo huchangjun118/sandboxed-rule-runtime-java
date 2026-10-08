@@ -214,9 +214,11 @@ public final class DefaultRuleRuntime implements RuleRuntime {
                     "sandbox overloaded, try again later", e);
         }
 
-        // Poll for the live context then force-close it at the deadline. close(true)
-        // unwinds even non-yielding interpreter loops on the worker thread.
-        watchdog.schedule(() -> {
+        // Force-close the live context at the deadline. close(true) unwinds even
+        // non-yielding interpreter loops on the worker thread. The handle is cancelled on
+        // normal completion so a recycled worker can never have a stale deadline close the
+        // context of an unrelated later evaluation.
+        java.util.concurrent.ScheduledFuture<?> watchdogTask = watchdog.schedule(() -> {
             Thread w = workerHolder[0];
             if (w != null) {
                 Context ctx = activeContexts.get(w);
@@ -231,7 +233,9 @@ public final class DefaultRuleRuntime implements RuleRuntime {
         }, timeoutMillis, TimeUnit.MILLISECONDS);
 
         try {
-            return future.get(timeoutMillis + 250L, TimeUnit.MILLISECONDS);
+            EvaluationResult result = future.get(timeoutMillis + 250L, TimeUnit.MILLISECONDS);
+            watchdogTask.cancel(false);
+            return result;
         } catch (TimeoutException e) {
             future.cancel(true);
             throw new ScriptExecutionException(ExecutionErrorKind.TIMEOUT,
@@ -244,6 +248,7 @@ public final class DefaultRuleRuntime implements RuleRuntime {
             future.cancel(true);
             throw new ScriptExecutionException(ExecutionErrorKind.INTERNAL, "interrupted", e);
         } catch (ExecutionException e) {
+            watchdogTask.cancel(false);
             Throwable cause = e.getCause();
             if (cause instanceof ScriptExecutionException see) {
                 throw see;

@@ -87,6 +87,26 @@ class RuntimeSmokeTest {
     }
 
     @Test
+    void staleWatchdogCannotKillLaterEvaluationOnRecycledWorker() {
+        // A rule with a tiny timeout that loops; its watchdog fires after the call fails.
+        ResourceQuota fast = new ResourceQuota(80, quota.getMemoryBytes(),
+                quota.getOutputBytes(), quota.getMaxRecursionDepth(), 10_000_000_000L);
+        runtime.publish("stale", 1, "function decide(){ while(true){} }", fast);
+        assertThrows(ScriptExecutionException.class,
+                () -> runtime.evaluate(new EvaluationRequest("stale",
+                        Map.of(), Map.of(), 1L)));
+        // Immediately hammer healthy rules (more calls than workers) so recycled workers
+        // are reused right around the stale deadline; none may be spuriously cancelled.
+        runtime.publish("healthy", 1, "function decide(){ return {allowed:true}; }", quota);
+        for (int i = 0; i < 24; i++) {
+            EvaluationResult r = runtime.evaluate(new EvaluationRequest("healthy",
+                    Map.of(), Map.of(), 1L));
+            assertTrue(r.getDecision().isAllowed(),
+                    "stale watchdog cancelled an unrelated healthy evaluation at " + i);
+        }
+    }
+
+    @Test
     void recursionLimit() {
         runtime.publish("r4", 1,
                 "function decide(){ function f(n){ return n<=0?0:1+f(n-1);} return {allowed:f(100000)>=0}; }",
