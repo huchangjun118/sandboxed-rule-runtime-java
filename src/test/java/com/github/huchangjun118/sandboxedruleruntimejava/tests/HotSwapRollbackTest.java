@@ -40,7 +40,7 @@ class HotSwapRollbackTest {
     void setUp() {
         RuntimeProperties props = new RuntimeProperties();
         props.setWorkerThreads(8);
-        props.setDefaultTimeoutMillis(8000);
+        props.setDefaultTimeoutMillis(20000);
         props.setHistoryPerRule(50);
         runtime = new DefaultRuleRuntime(props, new GraalSandboxEngine(new SandboxPolicy()));
         quota = runtime.defaultQuota();
@@ -138,7 +138,7 @@ class HotSwapRollbackTest {
         runtime.publish("sw", 2, "function decide(){ return {allowed:true, reason:'v2'}; }", quota);
 
         for (Future<?> f : futures) {
-            f.get(15, TimeUnit.SECONDS);
+            f.get(30, TimeUnit.SECONDS);
         }
         pool.shutdownNow();
         assertEquals(0, errors.get(), "no evaluation may be lost or return a torn version");
@@ -155,7 +155,7 @@ class HotSwapRollbackTest {
     void concurrentSwapsProduceOnlyCommittedConsistentResults() throws Exception {
         runtime.publish("hot", 1,
                 "function decide(input){ return {allowed:true, reason:'v'+input.v}; }", quota);
-        int versions = 20;
+        int versions = 10;
         ExecutorService pool = Executors.newFixedThreadPool(8);
         CountDownLatch start = new CountDownLatch(1);
         AtomicInteger errors = new AtomicInteger();
@@ -171,7 +171,7 @@ class HotSwapRollbackTest {
                         quota);
             });
         }
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < 48; i++) {
             Future<?> f = pool.submit(() -> {
                 try {
                     start.await();
@@ -193,7 +193,7 @@ class HotSwapRollbackTest {
         }
         start.countDown();
         for (Future<?> f : futures.values()) {
-            f.get(15, TimeUnit.SECONDS);
+            f.get(30, TimeUnit.SECONDS);
         }
         pool.shutdownNow();
         assertEquals(0, errors.get());

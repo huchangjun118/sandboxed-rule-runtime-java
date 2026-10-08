@@ -63,6 +63,27 @@ class ResourceQuotaTest {
     }
 
     @Test
+    void manySmallWritesAlsoEnforcedAndUnderLimitCaptured() {
+        // Many tiny prints exercise the buffered batch-write path (not a single big one).
+        ResourceQuota small = with(q, q.getTimeoutMillis(), q.getMemoryBytes(),
+                128, q.getMaxRecursionDepth(), q.getStatementLimit());
+        runtime.publish("outmany", 1,
+                "function decide(){ for(var i=0;i<1000;i++){ print('row-'+i); } return {allowed:true}; }",
+                small);
+        ScriptExecutionException e = assertThrows(ScriptExecutionException.class,
+                () -> runtime.evaluate(request("outmany")));
+        assertEquals(ExecutionErrorKind.OUTPUT_LIMIT, e.getKind());
+
+        // Within quota: output prefix is captured and returned, not truncated.
+        runtime.publish("outok", 1,
+                "function decide(){ print('hello'); print('world'); return {allowed:true}; }", q);
+        EvaluationResult r = runtime.evaluate(request("outok"));
+        assertFalse(r.isOutputTruncated());
+        assertTrue(r.getOutput().contains("hello"));
+        assertTrue(r.getOutput().contains("world"));
+    }
+
+    @Test
     void statementLimitStopsBusyLoopWithoutWaitingForTimeout() {
         // Tight loop that does little allocation: statement budget trips well before timeout.
         ResourceQuota tight = with(q, 5000, q.getMemoryBytes(), q.getOutputBytes(),

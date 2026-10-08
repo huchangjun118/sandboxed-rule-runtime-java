@@ -41,11 +41,11 @@ public final class CappedOutputBuffer extends OutputStream {
         if (len <= 0) {
             return;
         }
-        long projected = (long) size + len;
-        if (projected > limit) {
+        if ((long) size + len > limit) {
             overflowed = true;
         }
-        int allowed = (int) Math.max(0, limit - size);
+        // Copy no more than this write offers AND no more than the remaining quota.
+        int allowed = (int) Math.min(len, Math.max(0, limit - size));
         if (allowed > 0) {
             ensureCapacity(size + allowed);
             System.arraycopy(bytes, off, data, size, allowed);
@@ -57,7 +57,10 @@ public final class CappedOutputBuffer extends OutputStream {
         if (needed <= data.length) {
             return;
         }
-        int grown = Math.max(needed, Math.min(limit, data.length * 2));
+        // Grow at least to what is needed (up to the hard cap); >=2x amortisation for the
+        // common small-write case. Long arithmetic prevents int overflow for big buffers.
+        long target = Math.max((long) needed, (long) data.length * 2L);
+        int grown = (int) Math.min((long) limit, target);
         byte[] bigger = new byte[grown];
         System.arraycopy(data, 0, bigger, 0, size);
         data = bigger;
